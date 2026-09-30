@@ -20,12 +20,10 @@ jobs:
       - name: Install meson
         run: pip install meson ninja
 
-      - name: Download subprojects
-        run: meson subprojects download
-
       - name: Configure
         run: meson setup build-uwp --buildtype release -Dopenssl=disabled -Dextra_shaders=disabled -Dgfx_backend=gles -Dangle=enabled -Dangle_direct3d11=enabled -Dangle_vulkan=disabled -Dangle_metal=disabled -Dangle_null=disabled
 
       - name: Show log tail
         if: always()
-        run: Get-Content build-uwp/meson-logs/meson-log.txt -Tail 80
+        run: |
+          if (Test-Path build-uwp/meson-logs/meson-log.txt) { Get-Content build-uwp/meson-logs/meson-log.txt -Tail 80 } else { Write-Host "no meson log" }
