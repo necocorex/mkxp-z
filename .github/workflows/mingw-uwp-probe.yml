@@ -22,20 +22,26 @@ jobs:
           sed "s/0x0601/0x0A00/g" windows/meson-gcc-x86_64.txt > "$RUNNER_TEMP/uwp.txt"
 
       - name: Configure
-        run: meson setup --cross-file "$RUNNER_TEMP/uwp.txt" --buildtype release -Dopenssl=disabled -Dextra_shaders=disabled -Dc_winlibs=-lwindowsapp -Dcpp_winlibs=-lwindowsapp build
+        run: meson setup --prefix "$GITHUB_WORKSPACE/build/artifact" --cross-file "$RUNNER_TEMP/uwp.txt" --buildtype release -Dstrip=true -Dopenssl=disabled -Dextra_shaders=disabled -Dc_winlibs=-lwindowsapp -Dcpp_winlibs=-lwindowsapp build
 
       - name: Build
-        continue-on-error: true
-        run: ninja -C build -k 0 -v > ninja.log 2>&1
+        run: ninja -C build -v > ninja.log 2>&1
 
-      - name: Show summary
+      - name: Install
+        run: meson install -C build --no-rebuild --tags mkxp-z
+
+      - name: Inspect imports
         if: always()
         run: |
-          echo "=== failed targets ==="
-          grep "^FAILED" ninja.log | cut -c1-150 | head -30 || true
-          echo "=== link problems ==="
-          grep -E "cannot find -l" ninja.log | head -10 || true
-          echo "=== undefined references ==="
-          grep -o "undefined reference to .*" ninja.log | sort | uniq -c | sort -rn | head -50 || true
-          echo "=== other errors ==="
-          grep -E "error:" ninja.log | cut -c1-200 | head -25 || true
+          ls -la build/artifact
+          for f in build/artifact/*.exe; do
+            echo "== $f"
+            x86_64-w64-mingw32-objdump -p "$f" | grep "DLL Name" | sort -u
+          done
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mkxp-z-win10-probe
+          path: build/artifact
