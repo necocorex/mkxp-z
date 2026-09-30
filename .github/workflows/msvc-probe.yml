@@ -1,0 +1,31 @@
+name: MSVC UWP probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    env:
+      CFLAGS: /DWINAPI_FAMILY=2 /D_WIN32_WINNT=0x0A00
+      CXXFLAGS: /DWINAPI_FAMILY=2 /D_WIN32_WINNT=0x0A00
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+          uwp: true
+
+      - name: Install meson
+        run: pip install meson ninja
+
+      - name: Download subprojects
+        run: meson subprojects download
+
+      - name: Configure
+        run: meson setup build-uwp --buildtype release -Dopenssl=disabled -Dextra_shaders=disabled -Dgfx_backend=gles -Dangle=enabled -Dangle_direct3d11=enabled -Dangle_vulkan=disabled -Dangle_metal=disabled -Dangle_null=disabled
+
+      - name: Show log tail
+        if: always()
+        run: Get-Content build-uwp/meson-logs/meson-log.txt -Tail 80
