@@ -20,11 +20,21 @@ jobs:
       - name: Make UWP cross file
         run: |
           sed "s/'-D_WIN32_WINNT=0x0601'/'-D_WIN32_WINNT=0x0A00', '-DWINAPI_FAMILY=2'/g" windows/meson-gcc-x86_64.txt > "$RUNNER_TEMP/uwp.txt"
-          cat "$RUNNER_TEMP/uwp.txt"
 
       - name: Configure
         run: meson setup --cross-file "$RUNNER_TEMP/uwp.txt" --buildtype release -Dopenssl=disabled -Dextra_shaders=disabled build
 
-      - name: Build (log tail)
+      - name: Build
+        continue-on-error: true
+        run: ninja -C build -v > ninja.log 2>&1
+
+      - name: Show errors
         if: always()
-        run: ninja -C build -v 2>&1 | tail -n 80
+        run: |
+          echo "=== first errors ==="
+          grep -n -E "error:|Error [0-9]|configure: error|undefined reference|cannot find|No such file" ninja.log | head -40 || true
+          echo "=== meson-logs ==="
+          ls build/meson-logs
+          for f in build/meson-logs/*ruby*; do echo "=== $f"; tail -n 60 "$f"; done || true
+          echo "=== ruby config.log ==="
+          tail -n 60 build/subprojects/ruby-3_1_3/build/config.log || true
