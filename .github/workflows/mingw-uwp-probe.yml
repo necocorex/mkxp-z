@@ -19,22 +19,23 @@ jobs:
 
       - name: Make UWP cross file
         run: |
-          sed "s/'-D_WIN32_WINNT=0x0601'/'-D_WIN32_WINNT=0x0A00', '-DWINAPI_FAMILY=2'/g" windows/meson-gcc-x86_64.txt > "$RUNNER_TEMP/uwp.txt"
+          sed "s/0x0601/0x0A00/g" windows/meson-gcc-x86_64.txt > "$RUNNER_TEMP/uwp.txt"
 
       - name: Configure
-        run: meson setup --cross-file "$RUNNER_TEMP/uwp.txt" --buildtype release -Dopenssl=disabled -Dextra_shaders=disabled build
+        run: meson setup --cross-file "$RUNNER_TEMP/uwp.txt" --buildtype release -Dopenssl=disabled -Dextra_shaders=disabled -Dc_winlibs=-lwindowsapp -Dcpp_winlibs=-lwindowsapp build
 
       - name: Build
         continue-on-error: true
-        run: ninja -C build -v > ninja.log 2>&1
+        run: ninja -C build -k 0 -v > ninja.log 2>&1
 
-      - name: Show errors
+      - name: Show summary
         if: always()
         run: |
-          echo "=== first errors ==="
-          grep -n -E "error:|Error [0-9]|configure: error|undefined reference|cannot find|No such file" ninja.log | head -40 || true
-          echo "=== meson-logs ==="
-          ls build/meson-logs
-          for f in build/meson-logs/*ruby*; do echo "=== $f"; tail -n 60 "$f"; done || true
-          echo "=== ruby config.log ==="
-          tail -n 60 build/subprojects/ruby-3_1_3/build/config.log || true
+          echo "=== failed targets ==="
+          grep "^FAILED" ninja.log | cut -c1-150 | head -30 || true
+          echo "=== link problems ==="
+          grep -E "cannot find -l" ninja.log | head -10 || true
+          echo "=== undefined references ==="
+          grep -o "undefined reference to .*" ninja.log | sort | uniq -c | sort -rn | head -50 || true
+          echo "=== other errors ==="
+          grep -E "error:" ninja.log | cut -c1-200 | head -25 || true
