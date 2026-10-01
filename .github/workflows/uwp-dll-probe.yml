@@ -239,3 +239,9 @@ jobs:
         run: |
           $cert = New-SelfSignedCertificate -Type Custom -Subject "CN=NecoDev" -KeyUsage DigitalSignature -FriendlyName "NecoDev dev cert" -CertStoreLocation "Cert:\CurrentUser\My" -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
           $pw = ConvertTo-SecureString -String "xbox1234" -Force -AsPlainText
+          Export-PfxCertificate -Cert "Cert:\CurrentUser\My\$($cert.Thumbprint)" -FilePath cert.pfx -Password $pw | Out-Null
+          Export-Certificate -Cert "Cert:\CurrentUser\My\$($cert.Thumbprint)" -FilePath out\NecoDev.cer | Out-Null
+          makeappx pack /d pkg /p out\DllProbe.appx
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          signtool sign /fd SHA256 /f cert.pfx /p xbox1234 out\DllProbe.appx
+          if ($LASTEXITCODE -ne 0) { exit 1 }
