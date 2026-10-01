@@ -1,0 +1,53 @@
+name: Ruby UWP API audit
+
+on:
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y bison ccache cmake diffutils git make ruby
+          sudo apt install -y ninja-build python3-pip
+          pip3 install meson
+          sudo apt install -y gcc g++ mingw-w64
+
+      - uses: actions/checkout@v7
+
+      - name: Configure
+        run: meson setup --cross-file windows/meson-gcc-x86_64.txt --buildtype release -Dopenssl=disabled -Dextra_shaders=disabled build
+
+      - name: Build Ruby only
+        run: ninja -C build subprojects/ruby-3_1_3/ruby-3_1_3.stamp
+
+      - name: Audit Win32 API usage
+        env:
+          LC_ALL: C
+        run: |
+          LIBDIR=/usr/x86_64-w64-mingw32/lib
+          NM=x86_64-w64-mingw32-nm
+          echo "=== static libs found ==="
+          find build/subprojects/ruby-3_1_3 -name '*.a' | head -20
+          RUBYLIB=$(find build/subprojects/ruby-3_1_3 -name 'lib*ruby*static*.a' | head -1)
+          echo "Using: $RUBYLIB"
+
+          $NM -g --undefined-only "$RUBYLIB" 2>/dev/null | awk 'NF==2 && $1=="U" {print $2}' | sed 's/^__imp_//' | sort -u > undefined.txt
+          $NM -g --defined-only $LIBDIR/libwindowsapp.a 2>/dev/null | awk 'NF==3 {print $3}' | sed 's/^__imp_//' | sort -u > allowed.txt
+          for l in kernel32 user32 gdi32 advapi32 shell32 ole32 oleaut32 ws2_32 shlwapi iphlpapi imagehlp dbghelp bcrypt setupapi winmm version imm32 userenv psapi crypt32 wintrust mswsock ntdll; do
+            f=$LIBDIR/lib$l.a
+            [ -f "$f" ] && $NM -g --defined-only "$f" 2>/dev/null | awk 'NF==3 {print $3}' || true
+          done | sed 's/^__imp_//' | sort -u > desktop.txt
+
+          comm -12 undefined.txt desktop.txt > win32_used.txt
+          comm -23 win32_used.txt allowed.txt > forbidden.txt
+
+          echo "=== counts ==="
+          echo "all undefined symbols: $(wc -l < undefined.txt)"
+          echo "allowed UWP symbols known: $(wc -l < allowed.txt)"
+          echo "Win32 functions used by Ruby: $(wc -l < win32_used.txt)"
+          echo "NOT available in UWP: $(wc -l < forbidden.txt)"
+          echo "=== NOT available in UWP ==="
+          cat forbidden.txt | head -150
