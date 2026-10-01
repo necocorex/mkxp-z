@@ -110,6 +110,7 @@ jobs:
             </Properties>
             <Dependencies>
               <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.17763.0" MaxVersionTested="10.0.19041.0" />
+              <PackageDependency Name="Microsoft.VCLibs.140.00" MinVersion="14.0.0.0" Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" />
             </Dependencies>
             <Resources>
               <Resource Language="en-us" />
@@ -140,7 +141,7 @@ jobs:
 
       - name: Compile
         run: |
-          $clArgs = @('/nologo','/std:c++20','/EHsc','/MT','/O2','/DWINAPI_FAMILY=2','/DUNICODE','/D_UNICODE','main.cpp','/Fe:pkg\Hello.exe','/link','/APPCONTAINER','/SUBSYSTEM:WINDOWS','/NODEFAULTLIB:kernel32.lib','/NODEFAULTLIB:ole32.lib','windowsapp.lib','d3d11.lib','dxgi.lib')
+          $clArgs = @('/nologo','/std:c++20','/EHsc','/MD','/O2','/DWINAPI_FAMILY=2','/DUNICODE','/D_UNICODE','main.cpp','/Fe:pkg\Hello.exe','/link','/APPCONTAINER','/SUBSYSTEM:WINDOWS','/NODEFAULTLIB:kernel32.lib','/NODEFAULTLIB:ole32.lib','windowsapp.lib','d3d11.lib','dxgi.lib')
           & cl @clArgs
           if ($LASTEXITCODE -ne 0) { exit 1 }
           dumpbin /dependents pkg\Hello.exe
@@ -155,6 +156,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           signtool sign /fd SHA256 /f cert.pfx /p xbox1234 out\Hello.appx
           if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Get VCLibs framework package
+        run: Invoke-WebRequest -Uri https://aka.ms/Microsoft.VCLibs.x64.14.00.appx -OutFile out\Microsoft.VCLibs.x64.14.00.appx
 
       - name: Upload
         uses: actions/upload-artifact@v7
