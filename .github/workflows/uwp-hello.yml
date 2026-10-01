@@ -140,7 +140,7 @@ jobs:
 
       - name: Compile
         run: |
-          $clArgs = @('/nologo','/std:c++17','/EHsc','/MT','/O2','/DWINAPI_FAMILY=2','/DUNICODE','/D_UNICODE','main.cpp','/Fe:pkg\Hello.exe','/link','/APPCONTAINER','/SUBSYSTEM:WINDOWS','/NODEFAULTLIB:kernel32.lib','/NODEFAULTLIB:ole32.lib','windowsapp.lib','d3d11.lib','dxgi.lib')
+          $clArgs = @('/nologo','/std:c++20','/EHsc','/MT','/O2','/DWINAPI_FAMILY=2','/DUNICODE','/D_UNICODE','main.cpp','/Fe:pkg\Hello.exe','/link','/APPCONTAINER','/SUBSYSTEM:WINDOWS','/NODEFAULTLIB:kernel32.lib','/NODEFAULTLIB:ole32.lib','windowsapp.lib','d3d11.lib','dxgi.lib')
           & cl @clArgs
           if ($LASTEXITCODE -ne 0) { exit 1 }
           dumpbin /dependents pkg\Hello.exe
