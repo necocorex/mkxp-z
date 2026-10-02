@@ -1,0 +1,266 @@
+name: UWP DLL matrix
+
+on:
+  workflow_dispatch:
+
+jobs:
+  dlls:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build one test DLL per Windows library
+        run: |
+          sudo apt update
+          sudo apt install -y mingw-w64
+          mkdir out
+          while read -r lib func; do
+            [ -z "$lib" ] && continue
+            printf 'extern __declspec(dllimport) void __stdcall %s(void);\n__declspec(dllexport) int probe_value(void)\n{\n    volatile void *p = (void *)&%s;\n    return p ? 42 : 0;\n}\n' "$func" "$func" > t.c
+            x86_64-w64-mingw32-gcc -shared -O0 -o "out/t_${lib}.dll" t.c -l"$lib"
+          done <<'EOF'
+          kernel32 GetTickCount64
+          user32 CharNextW
+          gdi32 GetStockObject
+          advapi32 GetUserNameW
+          shell32 SHGetSpecialFolderLocation
+          ole32 CoTaskMemFree
+          oleaut32 SysAllocString
+          ws2_32 WSAStartup
+          iphlpapi GetAdaptersAddresses
+          bcrypt BCryptGenRandom
+          setupapi SetupDiDestroyDeviceInfoList
+          imm32 ImmGetContext
+          winmm timeGetTime
+          version GetFileVersionInfoSizeW
+          dbghelp SymSetOptions
+          shlwapi PathFileExistsW
+          imagehlp ImageDirectoryEntryToData
+          EOF
+          ls out
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dlls
+          path: out
+
+  app:
+    needs: dlls
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+          uwp: true
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: dlls
+          path: pkg
+
+      - name: Write sources
+        run: |
+          New-Item -ItemType Directory -Force pkg\Assets | Out-Null
+          New-Item -ItemType Directory -Force out | Out-Null
+          @'
+          #include <unknwn.h>
+          #include <windows.h>
+          #include <winrt/Windows.Foundation.h>
+          #include <winrt/Windows.ApplicationModel.Core.h>
+          #include <winrt/Windows.UI.Core.h>
+          #include <d3d11_1.h>
+          #include <dxgi1_2.h>
+          #include <wrl/client.h>
+
+          using namespace winrt;
+          using namespace winrt::Windows::ApplicationModel::Core;
+          using namespace winrt::Windows::UI::Core;
+          using Microsoft::WRL::ComPtr;
+
+          struct Result { int stage = 0; DWORD err = 0; int value = 0; };
+
+          static const wchar_t* kNames[] = {
+              L"t_kernel32.dll", L"t_user32.dll", L"t_gdi32.dll", L"t_advapi32.dll",
+              L"t_shell32.dll", L"t_ole32.dll", L"t_oleaut32.dll", L"t_ws2_32.dll",
+              L"t_iphlpapi.dll", L"t_bcrypt.dll", L"t_setupapi.dll", L"t_imm32.dll",
+              L"t_winmm.dll", L"t_version.dll", L"t_dbghelp.dll", L"t_shlwapi.dll",
+              L"t_imagehlp.dll" };
+          static const int kCount = 17;
+
+          static Result TryDll(const wchar_t* name)
+          {
+              Result r;
+              HMODULE m = LoadPackagedLibrary(name, 0);
+              if (!m) { r.stage = 0; r.err = GetLastError(); return r; }
+              typedef int (*Fn)();
+              Fn f = reinterpret_cast<Fn>(GetProcAddress(m, "probe_value"));
+              if (!f) { r.stage = 1; r.err = GetLastError(); return r; }
+              r.value = f();
+              r.stage = (r.value == 42) ? 3 : 2;
+              return r;
+          }
+
+          static void DrawResult(ID3D11DeviceContext1* c1, ID3D11RenderTargetView* rtv, int row, const Result& r)
+          {
+              const float colors[4][4] = {
+                  { 1.0f, 0.0f, 0.0f, 1.0f },
+                  { 1.0f, 0.5f, 0.0f, 1.0f },
+                  { 0.0f, 0.0f, 1.0f, 1.0f },
+                  { 0.0f, 1.0f, 0.0f, 1.0f } };
+              LONG y0 = row * 60 + 20;
+              D3D11_RECT status = { 50, y0, 150, y0 + 50 };
+              c1->ClearView(rtv, colors[r.stage], &status, 1);
+              for (int i = 0; i < 16; i++)
+              {
+                  bool bit = ((r.err >> (15 - i)) & 1) != 0;
+                  float c[4] = { bit ? 1.0f : 0.0f, bit ? 1.0f : 0.0f, bit ? 1.0f : 0.0f, 1.0f };
+                  D3D11_RECT bar = { 200 + i * 60, y0, 200 + i * 60 + 50, y0 + 50 };
+                  c1->ClearView(rtv, c, &bar, 1);
+              }
+          }
+
+          struct App : implements<App, IFrameworkViewSource, IFrameworkView>
+          {
+              bool closed = false;
+              IFrameworkView CreateView() { return *this; }
+              void Initialize(CoreApplicationView const&) {}
+              void Load(hstring const&) {}
+              void Uninitialize() {}
+              void SetWindow(CoreWindow const& w)
+              {
+                  w.Closed([this](auto&&, auto&&) { closed = true; });
+              }
+              void Run()
+              {
+                  CoreWindow window = CoreWindow::GetForCurrentThread();
+                  window.Activate();
+
+                  ComPtr<ID3D11Device> dev;
+                  ComPtr<ID3D11DeviceContext> ctx;
+                  D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+                      D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
+                      D3D11_SDK_VERSION, &dev, nullptr, &ctx);
+                  ComPtr<ID3D11DeviceContext1> ctx1;
+                  ctx.As(&ctx1);
+                  ComPtr<IDXGIDevice> dxgiDev;
+                  dev.As(&dxgiDev);
+                  ComPtr<IDXGIAdapter> adapter;
+                  dxgiDev->GetAdapter(&adapter);
+                  ComPtr<IDXGIFactory2> factory;
+                  adapter->GetParent(IID_PPV_ARGS(&factory));
+
+                  DXGI_SWAP_CHAIN_DESC1 d = {};
+                  d.Width = 1920;
+                  d.Height = 1080;
+                  d.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                  d.SampleDesc.Count = 1;
+                  d.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+                  d.BufferCount = 2;
+                  d.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+                  ComPtr<IDXGISwapChain1> sc;
+                  factory->CreateSwapChainForCoreWindow(dev.Get(),
+                      reinterpret_cast<IUnknown*>(get_abi(window)), &d, nullptr, &sc);
+
+                  ComPtr<ID3D11Texture2D> bb;
+                  sc->GetBuffer(0, IID_PPV_ARGS(&bb));
+                  ComPtr<ID3D11RenderTargetView> rtv;
+                  dev->CreateRenderTargetView(bb.Get(), nullptr, &rtv);
+
+                  float bg[4] = { 0.08f, 0.08f, 0.08f, 1.0f };
+                  ctx->ClearRenderTargetView(rtv.Get(), bg);
+                  sc->Present(1, 0);
+
+                  Result res[kCount];
+                  for (int i = 0; i < kCount; i++)
+                  {
+                      res[i] = TryDll(kNames[i]);
+                  }
+
+                  while (!closed)
+                  {
+                      window.Dispatcher().ProcessEvents(CoreProcessEventsOption::ProcessAllIfPresent);
+                      ctx->ClearRenderTargetView(rtv.Get(), bg);
+                      for (int i = 0; i < kCount; i++)
+                      {
+                          DrawResult(ctx1.Get(), rtv.Get(), i, res[i]);
+                      }
+                      sc->Present(1, 0);
+                  }
+              }
+          };
+
+          int __stdcall wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
+          {
+              CoreApplication::Run(make<App>());
+              return 0;
+          }
+          '@ | Set-Content -Path main.cpp -Encoding ascii
+
+          @'
+          <?xml version="1.0" encoding="utf-8"?>
+          <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+                   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10">
+            <Identity Name="NecoDev.DllMatrix" Publisher="CN=NecoDev" Version="1.0.0.0" ProcessorArchitecture="x64" />
+            <Properties>
+              <DisplayName>DLL matrix</DisplayName>
+              <PublisherDisplayName>Neco</PublisherDisplayName>
+              <Logo>Assets\StoreLogo.png</Logo>
+            </Properties>
+            <Dependencies>
+              <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.17763.0" MaxVersionTested="10.0.19041.0" />
+              <PackageDependency Name="Microsoft.VCLibs.140.00" MinVersion="14.0.0.0" Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" />
+            </Dependencies>
+            <Resources>
+              <Resource Language="en-us" />
+            </Resources>
+            <Applications>
+              <Application Id="App" Executable="Probe.exe" EntryPoint="Probe.App">
+                <uap:VisualElements DisplayName="DLL matrix" Description="DLL load matrix"
+                                    BackgroundColor="#783CC8"
+                                    Square150x150Logo="Assets\Square150x150Logo.png"
+                                    Square44x44Logo="Assets\Square44x44Logo.png" />
+              </Application>
+            </Applications>
+          </Package>
+          '@ | Set-Content -Path pkg\AppxManifest.xml -Encoding ascii
+
+          Add-Type -AssemblyName System.Drawing
+          function New-Png($path, $w, $h) {
+            $bmp = New-Object System.Drawing.Bitmap $w, $h
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.Clear([System.Drawing.Color]::FromArgb(255, 120, 60, 200))
+            $g.Dispose()
+            $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+            $bmp.Dispose()
+          }
+          New-Png "pkg\Assets\StoreLogo.png" 50 50
+          New-Png "pkg\Assets\Square44x44Logo.png" 44 44
+          New-Png "pkg\Assets\Square150x150Logo.png" 150 150
+
+      - name: Compile
+        run: |
+          $clArgs = @('/nologo','/std:c++20','/EHsc','/MD','/O2','/DWINAPI_FAMILY=2','/DUNICODE','/D_UNICODE','main.cpp','/Fe:pkg\Probe.exe','/link','/APPCONTAINER','/SUBSYSTEM:WINDOWS','/NODEFAULTLIB:kernel32.lib','/NODEFAULTLIB:ole32.lib','windowsapp.lib','d3d11.lib','dxgi.lib')
+          & cl @clArgs
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          dir pkg
+
+      - name: Package and sign
+        run: |
+          $cert = New-SelfSignedCertificate -Type Custom -Subject "CN=NecoDev" -KeyUsage DigitalSignature -FriendlyName "NecoDev dev cert" -CertStoreLocation "Cert:\CurrentUser\My" -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
+          $pw = ConvertTo-SecureString -String "xbox1234" -Force -AsPlainText
+          Export-PfxCertificate -Cert "Cert:\CurrentUser\My\$($cert.Thumbprint)" -FilePath cert.pfx -Password $pw | Out-Null
+          Export-Certificate -Cert "Cert:\CurrentUser\My\$($cert.Thumbprint)" -FilePath out\NecoDev.cer | Out-Null
+          makeappx pack /d pkg /p out\DllMatrix.appx
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          signtool sign /fd SHA256 /f cert.pfx /p xbox1234 out\DllMatrix.appx
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Get VCLibs framework package
+        run: Invoke-WebRequest -Uri https://aka.ms/Microsoft.VCLibs.x64.14.00.appx -OutFile out\Microsoft.VCLibs.x64.14.00.appx
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: uwp-dll-matrix
+          path: out
