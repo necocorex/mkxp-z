@@ -26,7 +26,7 @@ jobs:
       - name: Link probe DLL
         run: |
           mkdir out
-          cat > ruby_probe.c <<'EOF'
+          cat > ruby_old.c <<'EOF'
           #include <stdio.h>
           #include <string.h>
           #include <wchar.h>
