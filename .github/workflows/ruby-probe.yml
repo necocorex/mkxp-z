@@ -21,7 +21,7 @@ jobs:
         run: meson setup --cross-file windows/meson-gcc-x86_64.txt --buildtype release -Dopenssl=disabled -Dextra_shaders=disabled build
 
       - name: Build Ruby only
-        run: ninja -C build subprojects/ruby-3_1_3/ruby-3_1_3.stamp
+        run: ninja -C build subprojects/ruby-3_1_3/ruby-3_1_3.stamp subprojects/zlib-1.3.1/libz.a subprojects/libyaml-0.2.5/libyaml.a subprojects/libiconv-1.18/libiconv.a subprojects/libiconv-1.18/liblocalcharset.a
 
       - name: Link probe DLL
         run: |
@@ -83,8 +83,10 @@ jobs:
           EOF
           LIBS=$(find build/subprojects/ruby-3_1_3/build -name '*.a' | grep -v '/libruby.a$' | sort)
           FFI=$(find build/subprojects -name libffi.a | head -1)
+          EXTRA="build/subprojects/zlib-1.3.1/libz.a build/subprojects/libyaml-0.2.5/libyaml.a build/subprojects/libiconv-1.18/libiconv.a build/subprojects/libiconv-1.18/liblocalcharset.a"
           echo "archives: $(echo "$LIBS" | wc -l)  ffi: $FFI"
-          x86_64-w64-mingw32-gcc -shared -O2 -o out/ruby_probe.dll ruby_probe.c -Wl,--start-group $LIBS $FFI -Wl,--end-group -static -lshell32 -lws2_32 -liphlpapi -limagehlp -lshlwapi -lbcrypt -luser32 -lgdi32 -lole32 -loleaut32 -lversion -luuid -ladvapi32 -lsetupapi -lwinmm -limm32 -lm > link.log 2>&1 || { tail -n 60 link.log; exit 1; }
+          SYS="-lpthread -lshell32 -lws2_32 -liphlpapi -limagehlp -lshlwapi -lbcrypt -luser32 -lgdi32 -lole32 -loleaut32 -lversion -luuid -ladvapi32 -lsetupapi -lwinmm -limm32 -lm"
+          x86_64-w64-mingw32-gcc -shared -O2 -o out/ruby_probe.dll ruby_probe.c -Wl,--start-group $LIBS $FFI $EXTRA -Wl,--end-group -static $SYS > link.log 2>&1 || { grep -o "undefined reference to .*" link.log | sort | uniq -c | sort -rn | head -40; tail -n 15 link.log; exit 1; }
           ls -la out
           x86_64-w64-mingw32-objdump -p out/ruby_probe.dll | grep "DLL Name"
 
