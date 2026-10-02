@@ -1,0 +1,387 @@
+name: Ruby in UWP probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rubydll:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y bison ccache cmake diffutils git make ruby
+          sudo apt install -y ninja-build python3-pip
+          pip3 install meson
+          sudo apt install -y gcc g++ mingw-w64
+
+      - uses: actions/checkout@v7
+
+      - name: Configure
+        run: meson setup --cross-file windows/meson-gcc-x86_64.txt --buildtype release -Dopenssl=disabled -Dextra_shaders=disabled build
+
+      - name: Build Ruby only
+        run: ninja -C build subprojects/ruby-3_1_3/ruby-3_1_3.stamp
+
+      - name: Link probe DLL
+        run: |
+          mkdir out
+          cat > ruby_probe.c <<'EOF'
+          #include <stdio.h>
+          #include <wchar.h>
+
+          typedef unsigned long long VALUE;
+          extern void ruby_sysinit(int *, char ***);
+          extern int ruby_setup(void);
+          extern void ruby_init_stack(void *);
+          extern VALUE rb_eval_string_protect(const char *, int *);
+
+          static volatile int g_stage = 1;
+          static const wchar_t *g_path = 0;
+
+          static void mark(int s)
+          {
+              g_stage = s;
+              if (g_path) {
+                  FILE *f = _wfopen(g_path, L"w");
+                  if (f) { fprintf(f, "%d", s); fclose(f); }
+              }
+          }
+
+          __declspec(dllexport) int get_stage(void)
+          {
+              return g_stage;
+          }
+
+          __declspec(dllexport) int run_probe(const wchar_t *logpath)
+          {
+              int local = 0;
+              int state = 0;
+              int argc = 1;
+              char arg0[] = "probe";
+              char *argv_arr[2];
+              char **argv;
+              VALUE v;
+              argv_arr[0] = arg0;
+              argv_arr[1] = 0;
+              argv = argv_arr;
+              g_path = logpath;
+              mark(2);
+              ruby_sysinit(&argc, &argv);
+              mark(3);
+              ruby_init_stack(&local);
+              if (ruby_setup() != 0) return -4;
+              mark(4);
+              v = rb_eval_string_protect("1+1", &state);
+              if (state != 0 || v != 5) return -5;
+              mark(5);
+              v = rb_eval_string_protect("GC.start; (1..10).map { |x| x * x }.sum", &state);
+              if (state != 0 || v != 771) return -6;
+              mark(6);
+              return 6;
+          }
+          EOF
+          LIBS=$(find build/subprojects/ruby-3_1_3/build -name '*.a' | grep -v '/libruby.a$' | sort)
+          FFI=$(find build/subprojects -name libffi.a | head -1)
+          echo "archives: $(echo "$LIBS" | wc -l)  ffi: $FFI"
+          x86_64-w64-mingw32-gcc -shared -O2 -o out/ruby_probe.dll ruby_probe.c -Wl,--start-group $LIBS $FFI -Wl,--end-group -static -lshell32 -lws2_32 -liphlpapi -limagehlp -lshlwapi -lbcrypt -luser32 -lgdi32 -lole32 -loleaut32 -lversion -luuid -ladvapi32 -lsetupapi -lwinmm -limm32 -lm > link.log 2>&1 || { tail -n 60 link.log; exit 1; }
+          ls -la out
+          x86_64-w64-mingw32-objdump -p out/ruby_probe.dll | grep "DLL Name"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dlls
+          path: out
+
+  app:
+    needs: rubydll
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+          uwp: true
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: dlls
+          path: pkg
+
+      - name: Write sources
+        run: |
+          New-Item -ItemType Directory -Force pkg\Assets | Out-Null
+          New-Item -ItemType Directory -Force out | Out-Null
+          @'
+          #include <unknwn.h>
+          #include <windows.h>
+          #include <winrt/Windows.Foundation.h>
+          #include <winrt/Windows.Storage.h>
+          #include <winrt/Windows.ApplicationModel.Core.h>
+          #include <winrt/Windows.UI.Core.h>
+          #include <d3d11_1.h>
+          #include <dxgi1_2.h>
+          #include <wrl/client.h>
+          #include <string>
+          #include <cstdio>
+
+          using namespace winrt;
+          using namespace winrt::Windows::ApplicationModel::Core;
+          using namespace winrt::Windows::UI::Core;
+          using Microsoft::WRL::ComPtr;
+
+          typedef int (*RunFn)(const wchar_t*);
+          typedef int (*StageFn)();
+
+          static RunFn pRun = nullptr;
+          static StageFn pGetStage = nullptr;
+          static std::wstring g_logpath;
+          static volatile int g_done = 0;
+          static volatile int g_ret = 0;
+
+          static DWORD WINAPI RubyThread(LPVOID)
+          {
+              g_ret = pRun(g_logpath.c_str());
+              g_done = 1;
+              return 0;
+          }
+
+          static int ReadStage(const std::wstring& p)
+          {
+              FILE* f = _wfopen(p.c_str(), L"r");
+              if (!f) return 0;
+              int v = 0;
+              if (fscanf(f, "%d", &v) != 1) v = 0;
+              fclose(f);
+              return v;
+          }
+
+          static void WriteStage(const std::wstring& p, int v)
+          {
+              FILE* f = _wfopen(p.c_str(), L"w");
+              if (f) { fprintf(f, "%d", v); fclose(f); }
+          }
+
+          static void Box(ID3D11DeviceContext1* c, ID3D11RenderTargetView* rtv,
+              LONG x, LONG y, LONG w, LONG h, float r, float g, float b)
+          {
+              if (w <= 0 || h <= 0) return;
+              float col[4] = { r, g, b, 1.0f };
+              D3D11_RECT rc = { x, y, x + w, y + h };
+              c->ClearView(rtv, col, &rc, 1);
+          }
+
+          static void Unary(ID3D11DeviceContext1* c, ID3D11RenderTargetView* rtv,
+              LONG y, int value, float r, float g, float b)
+          {
+              for (int i = 0; i < 8; i++)
+              {
+                  bool on = i < value;
+                  Box(c, rtv, 200 + i * 130, y, 110, 80,
+                      on ? r : 0.2f, on ? g : 0.2f, on ? b : 0.2f);
+              }
+          }
+
+          struct App : implements<App, IFrameworkViewSource, IFrameworkView>
+          {
+              bool closed = false;
+              IFrameworkView CreateView() { return *this; }
+              void Initialize(CoreApplicationView const&) {}
+              void Load(hstring const&) {}
+              void Uninitialize() {}
+              void SetWindow(CoreWindow const& w)
+              {
+                  w.Closed([this](auto&&, auto&&) { closed = true; });
+              }
+              void Run()
+              {
+                  CoreWindow window = CoreWindow::GetForCurrentThread();
+                  window.Activate();
+
+                  ComPtr<ID3D11Device> dev;
+                  ComPtr<ID3D11DeviceContext> ctx;
+                  D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+                      D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
+                      D3D11_SDK_VERSION, &dev, nullptr, &ctx);
+                  ComPtr<ID3D11DeviceContext1> ctx1;
+                  ctx.As(&ctx1);
+                  ComPtr<IDXGIDevice> dxgiDev;
+                  dev.As(&dxgiDev);
+                  ComPtr<IDXGIAdapter> adapter;
+                  dxgiDev->GetAdapter(&adapter);
+                  ComPtr<IDXGIFactory2> factory;
+                  adapter->GetParent(IID_PPV_ARGS(&factory));
+
+                  DXGI_SWAP_CHAIN_DESC1 d = {};
+                  d.Width = 1920;
+                  d.Height = 1080;
+                  d.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                  d.SampleDesc.Count = 1;
+                  d.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+                  d.BufferCount = 2;
+                  d.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+                  ComPtr<IDXGISwapChain1> sc;
+                  factory->CreateSwapChainForCoreWindow(dev.Get(),
+                      reinterpret_cast<IUnknown*>(get_abi(window)), &d, nullptr, &sc);
+
+                  ComPtr<ID3D11Texture2D> bb;
+                  sc->GetBuffer(0, IID_PPV_ARGS(&bb));
+                  ComPtr<ID3D11RenderTargetView> rtv;
+                  dev->CreateRenderTargetView(bb.Get(), nullptr, &rtv);
+
+                  auto folder = winrt::Windows::Storage::ApplicationData::Current().LocalFolder().Path();
+                  g_logpath = std::wstring(folder.c_str()) + L"\\stage.txt";
+                  int prev = ReadStage(g_logpath);
+
+                  float bg[4] = { 0.08f, 0.08f, 0.08f, 1.0f };
+                  int frame = 0;
+                  bool started = false;
+                  int loadStage = -1;
+                  DWORD loadErr = 0;
+
+                  while (!closed)
+                  {
+                      window.Dispatcher().ProcessEvents(CoreProcessEventsOption::ProcessAllIfPresent);
+
+                      if (!started && frame == 300)
+                      {
+                          started = true;
+                          WriteStage(g_logpath, 1);
+                          HMODULE m = LoadPackagedLibrary(L"ruby_probe.dll", 0);
+                          if (!m)
+                          {
+                              loadStage = 0;
+                              loadErr = GetLastError();
+                          }
+                          else
+                          {
+                              pRun = reinterpret_cast<RunFn>(GetProcAddress(m, "run_probe"));
+                              pGetStage = reinterpret_cast<StageFn>(GetProcAddress(m, "get_stage"));
+                              if (!pRun || !pGetStage)
+                              {
+                                  loadStage = 1;
+                                  loadErr = GetLastError();
+                              }
+                              else
+                              {
+                                  loadStage = 3;
+                                  CreateThread(nullptr, 16 * 1024 * 1024, RubyThread, nullptr,
+                                      STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
+                              }
+                          }
+                      }
+
+                      ctx->ClearRenderTargetView(rtv.Get(), bg);
+                      ID3D11DeviceContext1* c = ctx1.Get();
+                      ID3D11RenderTargetView* r = rtv.Get();
+
+                      float lr = 0.3f, lg = 0.3f, lb = 0.3f;
+                      if (loadStage == 0) { lr = 1.0f; lg = 0.0f; lb = 0.0f; }
+                      else if (loadStage == 1) { lr = 1.0f; lg = 0.5f; lb = 0.0f; }
+                      else if (loadStage == 3) { lr = 0.0f; lg = 1.0f; lb = 0.0f; }
+                      Box(c, r, 50, 40, 120, 80, lr, lg, lb);
+                      for (int i = 0; i < 16; i++)
+                      {
+                          bool bit = ((loadErr >> (15 - i)) & 1) != 0;
+                          float v = bit ? 1.0f : 0.0f;
+                          Box(c, r, 200 + i * 70, 40, 55, 80, v, v, v);
+                      }
+
+                      Box(c, r, 50, 180, 120, 80, 0.2f, 0.4f, 1.0f);
+                      Unary(c, r, 180, prev, 0.2f, 0.4f, 1.0f);
+
+                      int live = (started && pGetStage) ? pGetStage() : 0;
+                      float sr = 0.3f, sg = 0.3f, sb = 0.3f;
+                      if (started && !g_done) { sr = 1.0f; sg = 1.0f; sb = 0.0f; }
+                      if (g_done && g_ret == 6) { sr = 0.0f; sg = 1.0f; sb = 0.0f; }
+                      if (g_done && g_ret != 6) { sr = 1.0f; sg = 0.0f; sb = 0.0f; }
+                      Box(c, r, 50, 320, 120, 80, sr, sg, sb);
+                      Unary(c, r, 320, live, 0.0f, 1.0f, 0.0f);
+
+                      if (!started)
+                      {
+                          Box(c, r, 200, 460, 1500 * (300 - frame) / 300, 40, 1.0f, 1.0f, 1.0f);
+                      }
+
+                      sc->Present(1, 0);
+                      frame++;
+                  }
+              }
+          };
+
+          int __stdcall wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
+          {
+              CoreApplication::Run(make<App>());
+              return 0;
+          }
+          '@ | Set-Content -Path main.cpp -Encoding ascii
+
+          @'
+          <?xml version="1.0" encoding="utf-8"?>
+          <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+                   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10">
+            <Identity Name="NecoDev.RubyProbe" Publisher="CN=NecoDev" Version="1.0.0.0" ProcessorArchitecture="x64" />
+            <Properties>
+              <DisplayName>Ruby probe</DisplayName>
+              <PublisherDisplayName>Neco</PublisherDisplayName>
+              <Logo>Assets\StoreLogo.png</Logo>
+            </Properties>
+            <Dependencies>
+              <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.17763.0" MaxVersionTested="10.0.19041.0" />
+              <PackageDependency Name="Microsoft.VCLibs.140.00" MinVersion="14.0.0.0" Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" />
+            </Dependencies>
+            <Resources>
+              <Resource Language="en-us" />
+            </Resources>
+            <Applications>
+              <Application Id="App" Executable="Probe.exe" EntryPoint="Probe.App">
+                <uap:VisualElements DisplayName="Ruby probe" Description="Ruby in UWP test"
+                                    BackgroundColor="#783CC8"
+                                    Square150x150Logo="Assets\Square150x150Logo.png"
+                                    Square44x44Logo="Assets\Square44x44Logo.png" />
+              </Application>
+            </Applications>
+          </Package>
+          '@ | Set-Content -Path pkg\AppxManifest.xml -Encoding ascii
+
+          Add-Type -AssemblyName System.Drawing
+          function New-Png($path, $w, $h) {
+            $bmp = New-Object System.Drawing.Bitmap $w, $h
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.Clear([System.Drawing.Color]::FromArgb(255, 120, 60, 200))
+            $g.Dispose()
+            $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+            $bmp.Dispose()
+          }
+          New-Png "pkg\Assets\StoreLogo.png" 50 50
+          New-Png "pkg\Assets\Square44x44Logo.png" 44 44
+          New-Png "pkg\Assets\Square150x150Logo.png" 150 150
+
+      - name: Compile
+        run: |
+          $clArgs = @('/nologo','/std:c++20','/EHsc','/MD','/O2','/DWINAPI_FAMILY=2','/DUNICODE','/D_UNICODE','/D_CRT_SECURE_NO_WARNINGS','main.cpp','/Fe:pkg\Probe.exe','/link','/APPCONTAINER','/SUBSYSTEM:WINDOWS','/NODEFAULTLIB:kernel32.lib','/NODEFAULTLIB:ole32.lib','windowsapp.lib','d3d11.lib','dxgi.lib')
+          & cl @clArgs
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          dir pkg
+
+      - name: Package and sign
+        run: |
+          $cert = New-SelfSignedCertificate -Type Custom -Subject "CN=NecoDev" -KeyUsage DigitalSignature -FriendlyName "NecoDev dev cert" -CertStoreLocation "Cert:\CurrentUser\My" -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
+          $pw = ConvertTo-SecureString -String "xbox1234" -Force -AsPlainText
+          Export-PfxCertificate -Cert "Cert:\CurrentUser\My\$($cert.Thumbprint)" -FilePath cert.pfx -Password $pw | Out-Null
+          Export-Certificate -Cert "Cert:\CurrentUser\My\$($cert.Thumbprint)" -FilePath out\NecoDev.cer | Out-Null
+          makeappx pack /d pkg /p out\RubyProbe.appx
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          signtool sign /fd SHA256 /f cert.pfx /p xbox1234 out\RubyProbe.appx
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Get VCLibs framework package
+        run: Invoke-WebRequest -Uri https://aka.ms/Microsoft.VCLibs.x64.14.00.appx -OutFile out\Microsoft.VCLibs.x64.14.00.appx
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: uwp-ruby-probe
+          path: out
