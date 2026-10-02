@@ -1,0 +1,282 @@
+name: Ruby in UWP probe 2
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rubydll:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y bison ccache cmake diffutils git make ruby
+          sudo apt install -y ninja-build python3-pip
+          pip3 install meson
+          sudo apt install -y gcc g++ mingw-w64
+
+      - uses: actions/checkout@v7
+
+      - name: Configure
+        run: meson setup --cross-file windows/meson-gcc-x86_64.txt --buildtype release -Dopenssl=disabled -Dextra_shaders=disabled build
+
+      - name: Build Ruby only
+        run: ninja -C build subprojects/ruby-3_1_3/ruby-3_1_3.stamp subprojects/zlib-1.3.1/libz.a subprojects/libyaml-0.2.5/libyaml.a subprojects/libiconv-1.18/libiconv.a subprojects/libiconv-1.18/liblocalcharset.a
+
+      - name: Link probe DLL
+        run: |
+          mkdir out
+          cat > ruby_probe.c <<'EOF'
+          #include <stdio.h>
+          #include <string.h>
+          #include <wchar.h>
+
+          typedef unsigned long long VALUE;
+          extern void ruby_sysinit(int *, char ***);
+          extern int ruby_setup(void);
+          extern void ruby_init_stack(void *);
+          extern VALUE rb_eval_string_protect(const char *, int *);
+          extern VALUE rb_errinfo(void);
+          extern void rb_set_errinfo(VALUE);
+          extern const char *rb_obj_classname(VALUE);
+
+          static volatile int g_stage = 1;
+          static volatile int g_res[8];
+          static volatile int g_errclass = 0;
+          static const wchar_t *g_path = 0;
+
+          static void mark(int s)
+          {
+              g_stage = s;
+              if (g_path) {
+                  FILE *f = _wfopen(g_path, L"w");
+                  if (f) { fprintf(f, "%d", s); fclose(f); }
+              }
+          }
+
+          static int classcode(const char *n)
+          {
+              if (!n) return 12;
+              if (!strcmp(n, "NoMethodError")) return 1;
+              if (!strcmp(n, "NameError")) return 2;
+              if (!strcmp(n, "NotImplementedError")) return 3;
+              if (!strcmp(n, "LoadError")) return 4;
+              if (!strcmp(n, "RuntimeError")) return 5;
+              if (!strcmp(n, "TypeError")) return 6;
+              if (!strcmp(n, "ArgumentError")) return 7;
+              if (!strcmp(n, "SystemStackError")) return 8;
+              if (!strcmp(n, "NoMemoryError")) return 9;
+              if (!strcmp(n, "ScriptError") || !strcmp(n, "SyntaxError")) return 10;
+              if (!strncmp(n, "Errno::", 7) || !strcmp(n, "SystemCallError")) return 11;
+              return 12;
+          }
+
+          static void run_test(int idx, const char *code, long expect)
+          {
+              int state = 0;
+              VALUE v;
+              mark(5 + idx);
+              v = rb_eval_string_protect(code, &state);
+              if (state == 0 && v == (VALUE)(2 * expect + 1)) {
+                  g_res[idx] = 1;
+                  return;
+              }
+              g_res[idx] = 2;
+              if (g_errclass == 0) {
+                  if (state != 0) {
+                      VALUE e = rb_errinfo();
+                      g_errclass = classcode(rb_obj_classname(e));
+                      rb_set_errinfo((VALUE)8);
+                  } else {
+                      g_errclass = 13;
+                  }
+              }
+          }
+
+          __declspec(dllexport) int get_stage(void) { return g_stage; }
+          __declspec(dllexport) int get_err(void) { return g_errclass; }
+          __declspec(dllexport) int get_res(int i) { return (i >= 0 && i < 8) ? g_res[i] : 0; }
+
+          __declspec(dllexport) int run_probe(const wchar_t *logpath)
+          {
+              int local = 0;
+              int argc = 1;
+              char arg0[] = "probe";
+              char *argv_arr[2];
+              char **argv;
+              int passed = 0;
+              int i;
+              argv_arr[0] = arg0;
+              argv_arr[1] = 0;
+              argv = argv_arr;
+              g_path = logpath;
+              mark(2);
+              ruby_sysinit(&argc, &argv);
+              mark(3);
+              ruby_init_stack(&local);
+              if (ruby_setup() != 0) return -4;
+              mark(4);
+              run_test(0, "1+1", 2);
+              run_test(1, "[1,2,3].map { |x| x * 2 }.size", 3);
+              run_test(2, "(1..10).sum", 55);
+              run_test(3, "'abc'.upcase.length", 3);
+              run_test(4, "GC.start; 7", 7);
+              run_test(5, "{a: 1, b: 2}.to_a.size", 2);
+              run_test(6, "Marshal.load(Marshal.dump([1,2,3])).size", 3);
+              run_test(7, "require 'zlib'; Zlib.crc32('a') & 255", 67);
+              mark(13);
+              for (i = 0; i < 8; i++) if (g_res[i] == 1) passed++;
+              return passed;
+          }
+          EOF
+          LIBS=$(find build/subprojects/ruby-3_1_3/build -name '*.a' | grep -v '/libruby.a$' | sort)
+          FFI=$(find build/subprojects -name libffi.a | head -1)
+          EXTRA="build/subprojects/zlib-1.3.1/libz.a build/subprojects/libyaml-0.2.5/libyaml.a build/subprojects/libiconv-1.18/libiconv.a build/subprojects/libiconv-1.18/liblocalcharset.a"
+          echo "archives: $(echo "$LIBS" | wc -l)  ffi: $FFI"
+          SYS="-lpthread -lshell32 -lws2_32 -liphlpapi -limagehlp -lshlwapi -lbcrypt -luser32 -lgdi32 -lole32 -loleaut32 -lversion -luuid -ladvapi32 -lsetupapi -lwinmm -limm32 -lm"
+          x86_64-w64-mingw32-gcc -shared -O2 -o out/ruby_probe.dll ruby_probe.c -Wl,--start-group $LIBS $FFI $EXTRA -Wl,--end-group -static $SYS > link.log 2>&1 || { grep -o "undefined reference to .*" link.log | sort | uniq -c | sort -rn | head -40; tail -n 15 link.log; exit 1; }
+          ls -la out
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dlls
+          path: out
+
+  app:
+    needs: rubydll
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+          uwp: true
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: dlls
+          path: pkg
+
+      - name: Write sources
+        run: |
+          New-Item -ItemType Directory -Force pkg\Assets | Out-Null
+          New-Item -ItemType Directory -Force out | Out-Null
+          @'
+          #include <unknwn.h>
+          #include <windows.h>
+          #include <winrt/Windows.Foundation.h>
+          #include <winrt/Windows.Storage.h>
+          #include <winrt/Windows.ApplicationModel.Core.h>
+          #include <winrt/Windows.UI.Core.h>
+          #include <d3d11_1.h>
+          #include <dxgi1_2.h>
+          #include <wrl/client.h>
+          #include <string>
+          #include <cstdio>
+
+          using namespace winrt;
+          using namespace winrt::Windows::ApplicationModel::Core;
+          using namespace winrt::Windows::UI::Core;
+          using Microsoft::WRL::ComPtr;
+
+          typedef int (*RunFn)(const wchar_t*);
+          typedef int (*StageFn)();
+          typedef int (*ResFn)(int);
+
+          static RunFn pRun = nullptr;
+          static StageFn pGetStage = nullptr;
+          static StageFn pGetErr = nullptr;
+          static ResFn pGetRes = nullptr;
+          static std::wstring g_logpath;
+          static volatile int g_done = 0;
+          static volatile int g_ret = 0;
+
+          static DWORD WINAPI RubyThread(LPVOID)
+          {
+              g_ret = pRun(g_logpath.c_str());
+              g_done = 1;
+              return 0;
+          }
+
+          static int ReadStage(const std::wstring& p)
+          {
+              FILE* f = _wfopen(p.c_str(), L"r");
+              if (!f) return 0;
+              int v = 0;
+              if (fscanf(f, "%d", &v) != 1) v = 0;
+              fclose(f);
+              return v;
+          }
+
+          static void WriteStage(const std::wstring& p, int v)
+          {
+              FILE* f = _wfopen(p.c_str(), L"w");
+              if (f) { fprintf(f, "%d", v); fclose(f); }
+          }
+
+          static void Box(ID3D11DeviceContext1* c, ID3D11RenderTargetView* rtv,
+              LONG x, LONG y, LONG w, LONG h, float r, float g, float b)
+          {
+              if (w <= 0 || h <= 0) return;
+              float col[4] = { r, g, b, 1.0f };
+              D3D11_RECT rc = { x, y, x + w, y + h };
+              c->ClearView(rtv, col, &rc, 1);
+          }
+
+          static void Unary(ID3D11DeviceContext1* c, ID3D11RenderTargetView* rtv,
+              LONG y, int value, int cells, float r, float g, float b)
+          {
+              for (int i = 0; i < cells; i++)
+              {
+                  bool on = i < value;
+                  Box(c, rtv, 200 + i * 110, y, 95, 80,
+                      on ? r : 0.2f, on ? g : 0.2f, on ? b : 0.2f);
+              }
+          }
+
+          struct App : implements<App, IFrameworkViewSource, IFrameworkView>
+          {
+              bool closed = false;
+              IFrameworkView CreateView() { return *this; }
+              void Initialize(CoreApplicationView const&) {}
+              void Load(hstring const&) {}
+              void Uninitialize() {}
+              void SetWindow(CoreWindow const& w)
+              {
+                  w.Closed([this](auto&&, auto&&) { closed = true; });
+              }
+              void Run()
+              {
+                  CoreWindow window = CoreWindow::GetForCurrentThread();
+                  window.Activate();
+
+                  ComPtr<ID3D11Device> dev;
+                  ComPtr<ID3D11DeviceContext> ctx;
+                  D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+                      D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
+                      D3D11_SDK_VERSION, &dev, nullptr, &ctx);
+                  ComPtr<ID3D11DeviceContext1> ctx1;
+                  ctx.As(&ctx1);
+                  ComPtr<IDXGIDevice> dxgiDev;
+                  dev.As(&dxgiDev);
+                  ComPtr<IDXGIAdapter> adapter;
+                  dxgiDev->GetAdapter(&adapter);
+                  ComPtr<IDXGIFactory2> factory;
+                  adapter->GetParent(IID_PPV_ARGS(&factory));
+
+                  DXGI_SWAP_CHAIN_DESC1 d = {};
+                  d.Width = 1920;
+                  d.Height = 1080;
+                  d.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                  d.SampleDesc.Count = 1;
+                  d.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+                  d.BufferCount = 2;
+                  d.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+                  ComPtr<IDXGISwapChain1> sc;
+                  factory->CreateSwapChainForCoreWindow(dev.Get(),
+                      reinterpret_cast<IUnknown*>(get_abi(window)), &d, nullptr, &sc);
+
+                  ComPtr<ID3D11Texture2D> bb;
+                  sc->GetBuffe
