@@ -1,0 +1,47 @@
+name: GL recon
+
+on:
+  workflow_dispatch:
+
+jobs:
+  recon:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y bison ccache cmake diffutils git make ruby
+          sudo apt install -y ninja-build python3-pip
+          pip3 install meson
+          sudo apt install -y gcc g++ mingw-w64
+
+      - uses: actions/checkout@v7
+
+      - name: Configure
+        run: meson setup --cross-file windows/meson-gcc-x86_64.txt --buildtype release -Dopenssl=disabled -Dextra_shaders=disabled build
+
+      - name: GL requirements of the engine
+        if: always()
+        run: |
+          echo "=== gl-fun.h ==="
+          f=$(find src -name 'gl-fun.h' | head -1)
+          echo "file: $f"
+          wc -l "$f"
+          head -n 60 "$f"
+          echo "=== version and context hints ==="
+          grep -rn "GL_MAJOR_VERSION\|GL_VERSION\|glGetString\|glad\|gladLoad" src | head -25
+          grep -rn "#version" src shader 2>/dev/null | head -10
+          grep -rn "SDL_GL_CONTEXT_MAJOR\|SDL_GL_CONTEXT_MINOR" src | head
+          echo "=== is offscreen enabled in the SDL config ==="
+          grep -rn "SDL_VIDEO_DRIVER_OFFSCREEN\|SDL_VIDEO_OPENGL_EGL" build --include=*.h 2>/dev/null | head
+
+      - name: ANGLE build setup
+        if: always()
+        run: |
+          echo "=== ANGLE meson.build (packagefiles) ==="
+          f=$(find subprojects -path '*packagefiles/angle*' -name meson.build | head -1)
+          echo "file: $f"
+          grep -n -i "uwp\|winrt\|WINAPI_FAMILY\|d3dcompiler\|window\|native" "$f" | head -40
+          echo "=== UWP window code present in ANGLE sources ==="
+          find subprojects/angle-chromium-8037_21/src -ipath '*winrt*' | head
+          grep -rln "ANGLE_ENABLE_WINDOWS_UWP" subprojects/angle-chromium-8037_21/src | head -5
