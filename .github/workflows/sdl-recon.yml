@@ -1,0 +1,49 @@
+name: SDL recon
+
+on:
+  workflow_dispatch:
+
+jobs:
+  recon:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y bison ccache cmake diffutils git make ruby
+          sudo apt install -y ninja-build python3-pip
+          pip3 install meson
+          sudo apt install -y gcc g++ mingw-w64
+
+      - uses: actions/checkout@v7
+
+      - name: Configure
+        run: meson setup --cross-file windows/meson-gcc-x86_64.txt --buildtype release -Dopenssl=disabled -Dextra_shaders=disabled build
+
+      - name: Recon part 1 (SDL build setup)
+        if: always()
+        run: |
+          SDL=subprojects/SDL2-2.28.1
+          echo "=== offscreen dir ==="
+          ls $SDL/src/video/offscreen
+          echo "=== video drivers in SDL meson.build ==="
+          grep -n -i "offscreen\|winrt\|dummy\|VIDEO_DRIVER" $SDL/meson.build | head -50
+          echo "=== static-angle patch ==="
+          find subprojects/packagefiles -name 'sdl2-static-angle.patch' -exec head -n 90 {} \;
+
+      - name: Recon part 2 (offscreen driver source)
+        if: always()
+        run: |
+          SDL=subprojects/SDL2-2.28.1
+          echo "=== offscreenwindow.c ==="
+          sed -n '22,140p' $SDL/src/video/offscreen/SDL_offscreenwindow.c
+          echo "=== offscreenopengles.c ==="
+          sed -n '22,140p' $SDL/src/video/offscreen/SDL_offscreenopengles.c
+
+      - name: Recon part 3 (how mkxp-z uses SDL)
+        if: always()
+        run: |
+          echo "=== mkxp-z SDL window and GL calls ==="
+          grep -rn "SDL_CreateWindow\|SDL_GL_SetAttribute\|SDL_GL_CreateContext\|SDL_Init(\|SDL_SetHint\|SDL_VIDEODRIVER" src | head -50
+          echo "=== SDL EGL helpers ==="
+          grep -n "SDL_EGL_CreateSurface\|SDL_EGL_CreatePBufferSurface\|SDL_EGL_LoadLibrary" subprojects/SDL2-2.28.1/src/video/SDL_egl.c | head
