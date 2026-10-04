@@ -75,7 +75,7 @@ jobs:
 
       - name: Compile
         run: |
-          Copy-Item angle_probe.cpp main.cpp
+          Copy-Item angle-probe.cpp main.cpp
           $clArgs = @('/nologo','/std:c++20','/EHsc','/MD','/O2','/DWINAPI_FAMILY=2','/DUNICODE','/D_UNICODE','main.cpp','/Fe:pkg\Probe.exe','/link','/APPCONTAINER','/SUBSYSTEM:WINDOWS','/NODEFAULTLIB:kernel32.lib','/NODEFAULTLIB:ole32.lib','windowsapp.lib','d3d11.lib','dxgi.lib')
           & cl @clArgs
           if ($LASTEXITCODE -ne 0) { exit 1 }
