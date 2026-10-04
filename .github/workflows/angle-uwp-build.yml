@@ -1,0 +1,49 @@
+name: ANGLE UWP build probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y bison ccache cmake diffutils git make ruby
+          sudo apt install -y ninja-build python3-pip
+          pip3 install meson
+          sudo apt install -y gcc g++ mingw-w64
+
+      - uses: actions/checkout@v7
+
+      - name: Make cross file for Windows 10
+        run: |
+          sed "s/0x0601/0x0A00/g" windows/meson-gcc-x86_64.txt > "$RUNNER_TEMP/win10.txt"
+
+      - name: Configure
+        run: |
+          meson setup --cross-file "$RUNNER_TEMP/win10.txt" --buildtype release -Dopenssl=disabled -Dextra_shaders=disabled "-Dangle-chromium-8037_21:c_args=-DWINAPI_FAMILY=2" "-Dangle-chromium-8037_21:cpp_args=-DWINAPI_FAMILY=2" build > configure.log 2>&1 || { tail -n 40 configure.log; exit 1; }
+          tail -n 5 configure.log
+
+      - name: Show how ANGLE decided
+        if: always()
+        run: |
+          echo "=== UWP sections of the ANGLE meson.build ==="
+          sed -n '10,16p;665,690p;930,960p' subprojects/packagefiles/angle/meson.build
+
+      - name: Build ANGLE only
+        continue-on-error: true
+        run: ninja -C build -k 0 -v subprojects/angle-chromium-8037_21/libEGL.a subprojects/angle-chromium-8037_21/libGLESv2.a > ninja.log 2>&1
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "=== winrt sources compiled ==="
+          grep -c "winrt/" ninja.log || true
+          echo "=== failed objects ==="
+          grep "^FAILED" ninja.log | cut -c1-160 | head -30 || true
+          echo "=== most common errors ==="
+          grep -o "error: .*" ninja.log | sort | uniq -c | sort -rn | head -25 | cut -c1-170
+          echo "=== end of log ==="
+          tail -n 4 ninja.log | cut -c1-190
