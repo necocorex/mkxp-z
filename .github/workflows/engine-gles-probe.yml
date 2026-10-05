@@ -1,0 +1,45 @@
+name: Engine GLES probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y bison ccache cmake diffutils git make ruby
+          sudo apt install -y ninja-build python3-pip
+          pip3 install meson
+          sudo apt install -y gcc g++ mingw-w64
+
+      - uses: actions/checkout@v7
+
+      - name: Configure
+        run: |
+          meson setup --cross-file windows/meson-gcc-x86_64.txt --buildtype release -Dopenssl=disabled -Dextra_shaders=disabled -Dangle=disabled -Dgfx_backend=gles -DSDL2-2.28.1:use_video_offscreen=enabled build > configure.log 2>&1 || { tail -n 40 configure.log; exit 1; }
+          tail -n 6 configure.log
+
+      - name: SDL features in this configuration
+        run: |
+          grep -n "SDL_VIDEO_DRIVER_OFFSCREEN\|SDL_VIDEO_OPENGL_EGL\|SDL_VIDEO_OPENGL_ES2\|STATIC_ANGLE" build/subprojects/SDL2-2.28.1/include/SDL_config.h || true
+          echo "--- angle mentions in configure log ---"
+          grep -n -i "angle" configure.log | head -10 || true
+
+      - name: Build engine
+        continue-on-error: true
+        run: ninja -C build -k 0 mkxp-z.x86_64.exe > ninja.log 2>&1
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "=== exe produced? ==="
+          ls -la build/*.exe 2>&1 | head -3
+          echo "=== failed objects ==="
+          grep "^FAILED" ninja.log | cut -c1-170 | head -25 || true
+          echo "=== most common errors ==="
+          grep -o "error: .*" ninja.log | sort | uniq -c | sort -rn | head -25 | cut -c1-170
+          echo "=== end of log ==="
+          tail -n 4 ninja.log | cut -c1-190
