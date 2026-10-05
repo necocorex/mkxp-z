@@ -26,24 +26,23 @@ jobs:
           meson setup --cross-file "$RUNNER_TEMP/win10.txt" --buildtype release -Dopenssl=disabled -Dextra_shaders=disabled "-Dangle-chromium-8037_21:c_args=-DWINAPI_FAMILY=2" "-Dangle-chromium-8037_21:cpp_args=-DWINAPI_FAMILY=2" build > configure.log 2>&1 || { tail -n 40 configure.log; exit 1; }
           tail -n 5 configure.log
 
-      - name: Show how ANGLE decided
-        if: always()
+      - name: Did UWP mode activate
         run: |
-          echo "=== UWP sections of the ANGLE meson.build ==="
-          sed -n '10,16p;665,690p;930,960p' subprojects/packagefiles/angle/meson.build
+          echo "winrt window entries: $(grep -c 'winrt/' build/build.ninja)"
+          echo "winuwp utils entries: $(grep -c 'system_utils_winuwp' build/build.ninja)"
+          echo "win32 window entries: $(grep -c 'NativeWindow11Win32' build/build.ninja)"
+          echo "win32 utils entries: $(grep -c 'system_utils_win32' build/build.ninja)"
 
-      - name: Build ANGLE only
+      - name: Build ANGLE libraries
         continue-on-error: true
-        run: ninja -C build -k 0 -v subprojects/angle-chromium-8037_21/libEGL.a subprojects/angle-chromium-8037_21/libGLESv2.a > ninja.log 2>&1
+        run: ninja -C build -k 0 -v subprojects/angle-chromium-8037_21/libangle_common.a subprojects/angle-chromium-8037_21/libangle_d3d11_backend.a subprojects/angle-chromium-8037_21/libangle_d3d_shared.a subprojects/angle-chromium-8037_21/libANGLE.a > ninja.log 2>&1
 
       - name: Summary
         if: always()
         run: |
-          echo "=== winrt sources compiled ==="
-          grep -c "winrt/" ninja.log || true
           echo "=== failed objects ==="
-          grep "^FAILED" ninja.log | cut -c1-160 | head -30 || true
+          grep "^FAILED" ninja.log | cut -c1-170 | head -30 || true
           echo "=== most common errors ==="
-          grep -o "error: .*" ninja.log | sort | uniq -c | sort -rn | head -25 | cut -c1-170
+          grep -o "error: .*" ninja.log | sort | uniq -c | sort -rn | head -30 | cut -c1-170
           echo "=== end of log ==="
           tail -n 4 ninja.log | cut -c1-190
